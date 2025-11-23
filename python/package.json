@@ -1,0 +1,13 @@
+{
+  "name": "python-tools",
+  "version": "1.0.0",
+  "description": "Cross-platform Python virtual environment tools",
+  "type": "module",
+  "bin": {
+    "python-venv": "./python-venv.js",
+    "python-pip": "./python-pip.js",
+    "python-run": "./python-run.js"
+  },
+  "keywords": ["python", "venv", "pip", "cross-platform"],
+  "license": "MIT"
+}
