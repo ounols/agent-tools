@@ -1,0 +1,13 @@
+{
+  "name": "unity-tools",
+  "version": "1.0.0",
+  "description": "Unity code analysis tools",
+  "type": "module",
+  "bin": {
+    "unity-component": "./unity-component.js",
+    "unity-assembly": "./unity-assembly.js",
+    "unity-scriptable": "./unity-scriptable.js"
+  },
+  "keywords": ["unity", "unity3d", "gamedev", "analysis"],
+  "license": "MIT"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "unreal-tools",
+  "version": "1.0.0",
+  "description": "Unreal Engine code analysis tools",
+  "type": "module",
+  "bin": {
+    "unreal-class": "./unreal-class.js",
+    "unreal-module": "./unreal-module.js",
+    "unreal-subsystem": "./unreal-subsystem.js"
+  },
+  "keywords": ["unreal", "ue4", "ue5", "gamedev", "analysis"],
+  "license": "MIT"
+}
