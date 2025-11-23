@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
-import { spawn, execSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { platform } from "node:os";
+import { spawn, execSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, cpSync } from "node:fs";
+import { platform, homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import puppeteer from "puppeteer-core";
 
 const useProfile = process.argv[2] === "--profile";
@@ -17,15 +18,26 @@ if (process.argv[2] && process.argv[2] !== "--profile") {
 	process.exit(1);
 }
 
+const os = platform();
+const home = homedir();
+
+// Get cache directory for scraping profile
+function getCacheDir() {
+	if (os === "win32") {
+		return join(process.env["LOCALAPPDATA"] || join(home, "AppData", "Local"), "browser-tools", "scraping");
+	} else {
+		return join(home, ".cache", "browser-tools", "scraping");
+	}
+}
+
 // Detect OS and find Chrome executable
 function findChrome() {
-	const os = platform();
-
 	if (os === "darwin") {
 		// macOS
 		const paths = [
 			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 			"/Applications/Chromium.app/Contents/MacOS/Chromium",
+			"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
 		];
 		for (const p of paths) {
 			if (existsSync(p)) return p;
@@ -50,10 +62,16 @@ function findChrome() {
 		} catch {}
 	} else if (os === "win32") {
 		// Windows
+		const programFiles = process.env["PROGRAMFILES"] || "C:\\Program Files";
+		const programFilesX86 = process.env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)";
+		const localAppData = process.env["LOCALAPPDATA"] || join(home, "AppData", "Local");
+
 		const paths = [
-			process.env["PROGRAMFILES"] + "\\Google\\Chrome\\Application\\chrome.exe",
-			process.env["PROGRAMFILES(X86)"] + "\\Google\\Chrome\\Application\\chrome.exe",
-			process.env["LOCALAPPDATA"] + "\\Google\\Chrome\\Application\\chrome.exe",
+			join(programFiles, "Google", "Chrome", "Application", "chrome.exe"),
+			join(programFilesX86, "Google", "Chrome", "Application", "chrome.exe"),
+			join(localAppData, "Google", "Chrome", "Application", "chrome.exe"),
+			join(programFiles, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+			join(localAppData, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
 		];
 		for (const p of paths) {
 			if (existsSync(p)) return p;
@@ -65,40 +83,71 @@ function findChrome() {
 
 // Get default Chrome profile path for --profile option
 function getDefaultProfilePath() {
-	const os = platform();
-	const home = process.env["HOME"] || process.env["USERPROFILE"];
-
 	if (os === "darwin") {
-		return `${home}/Library/Application Support/Google/Chrome/`;
+		return join(home, "Library", "Application Support", "Google", "Chrome");
 	} else if (os === "linux") {
-		return `${home}/.config/google-chrome/`;
+		return join(home, ".config", "google-chrome");
 	} else if (os === "win32") {
-		return `${process.env["LOCALAPPDATA"]}\\Google\\Chrome\\User Data\\`;
+		const localAppData = process.env["LOCALAPPDATA"] || join(home, "AppData", "Local");
+		return join(localAppData, "Google", "Chrome", "User Data");
 	}
 	return null;
 }
 
 // Kill existing Chrome processes
 function killChrome() {
-	const os = platform();
 	try {
 		if (os === "darwin") {
 			execSync("killall 'Google Chrome' 2>/dev/null", { stdio: "ignore" });
+			execSync("killall 'Chromium' 2>/dev/null", { stdio: "ignore" });
 		} else if (os === "linux") {
 			execSync("pkill -f '(chrome|chromium)' 2>/dev/null", { stdio: "ignore" });
 		} else if (os === "win32") {
-			execSync("taskkill /F /IM chrome.exe 2>nul", { stdio: "ignore" });
+			spawnSync("taskkill", ["/F", "/IM", "chrome.exe"], { stdio: "ignore", shell: true });
+			spawnSync("taskkill", ["/F", "/IM", "brave.exe"], { stdio: "ignore", shell: true });
 		}
 	} catch {}
+}
+
+// Copy directory recursively (cross-platform)
+function copyProfile(src, dest) {
+	if (os === "win32") {
+		// Use Node.js built-in cpSync for Windows
+		try {
+			cpSync(src, dest, { recursive: true, force: true });
+		} catch (err) {
+			console.error("✗ Failed to copy profile:", err.message);
+			process.exit(1);
+		}
+	} else {
+		// Use rsync for Unix (faster for subsequent runs)
+		try {
+			execSync(`rsync -a --delete "${src}/" "${dest}/"`, { stdio: "pipe" });
+		} catch {
+			// Fallback to cp if rsync not available
+			try {
+				execSync(`cp -r "${src}/." "${dest}/"`, { stdio: "pipe" });
+			} catch (err) {
+				console.error("✗ Failed to copy profile:", err.message);
+				process.exit(1);
+			}
+		}
+	}
 }
 
 const chromePath = findChrome();
 if (!chromePath) {
 	console.error("✗ Chrome/Chromium not found. Please install Chrome or Chromium.");
-	console.error("\nOn Linux, you can install with:");
-	console.error("  sudo apt install chromium-browser  # Debian/Ubuntu");
-	console.error("  sudo dnf install chromium          # Fedora");
-	console.error("  sudo pacman -S chromium            # Arch");
+	if (os === "linux") {
+		console.error("\nOn Linux, you can install with:");
+		console.error("  sudo apt install chromium-browser  # Debian/Ubuntu");
+		console.error("  sudo dnf install chromium          # Fedora");
+		console.error("  sudo pacman -S chromium            # Arch");
+	} else if (os === "darwin") {
+		console.error("\nOn macOS, download from: https://www.google.com/chrome/");
+	} else if (os === "win32") {
+		console.error("\nOn Windows, download from: https://www.google.com/chrome/");
+	}
 	process.exit(1);
 }
 
@@ -109,16 +158,14 @@ killChrome();
 await new Promise((r) => setTimeout(r, 1000));
 
 // Setup profile directory
-execSync("mkdir -p ~/.cache/scraping", { stdio: "ignore" });
+const cacheDir = getCacheDir();
+mkdirSync(cacheDir, { recursive: true });
 
 if (useProfile) {
 	const profilePath = getDefaultProfilePath();
 	if (profilePath && existsSync(profilePath)) {
-		// Sync profile with rsync (much faster on subsequent runs)
-		execSync(
-			`rsync -a --delete "${profilePath}" ~/.cache/scraping/`,
-			{ stdio: "pipe" },
-		);
+		console.log("Copying profile (this may take a moment)...");
+		copyProfile(profilePath, cacheDir);
 	} else {
 		console.error("✗ Default Chrome profile not found at:", profilePath);
 		process.exit(1);
@@ -126,16 +173,19 @@ if (useProfile) {
 }
 
 // Start Chrome in background (detached so Node can exit)
-spawn(
-	chromePath,
-	[
-		"--remote-debugging-port=9222",
-		`--user-data-dir=${process.env["HOME"]}/.cache/scraping`,
-		"--no-first-run",
-		"--no-default-browser-check",
-	],
-	{ detached: true, stdio: "ignore" },
-).unref();
+const chromeArgs = [
+	"--remote-debugging-port=9222",
+	`--user-data-dir=${cacheDir}`,
+	"--no-first-run",
+	"--no-default-browser-check",
+];
+
+// Windows needs shell: true for proper detaching
+const spawnOptions = os === "win32"
+	? { detached: true, stdio: "ignore", shell: true }
+	: { detached: true, stdio: "ignore" };
+
+spawn(chromePath, chromeArgs, spawnOptions).unref();
 
 // Wait for Chrome to be ready by attempting to connect
 let connected = false;
