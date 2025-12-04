@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { spawn, execSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, cpSync } from "node:fs";
-import { platform, homedir, tmpdir } from "node:os";
+import { existsSync, mkdirSync, cpSync, rmSync } from "node:fs";
+import { platform, homedir } from "node:os";
 import { join } from "node:path";
 import puppeteer from "puppeteer-core";
 
@@ -94,17 +94,15 @@ function getDefaultProfilePath() {
 	return null;
 }
 
-// Kill existing Chrome processes
-function killChrome() {
+// Remove SingletonLock files to allow new Chrome instance
+function removeSingletonLocks(dir) {
 	try {
-		if (os === "darwin") {
-			execSync("killall 'Google Chrome' 2>/dev/null", { stdio: "ignore" });
-			execSync("killall 'Chromium' 2>/dev/null", { stdio: "ignore" });
-		} else if (os === "linux") {
-			execSync("pkill -f '(chrome|chromium)' 2>/dev/null", { stdio: "ignore" });
-		} else if (os === "win32") {
-			spawnSync("taskkill", ["/F", "/IM", "chrome.exe"], { stdio: "ignore", shell: true });
-			spawnSync("taskkill", ["/F", "/IM", "brave.exe"], { stdio: "ignore", shell: true });
+		const lockFiles = ["SingletonLock", "SingletonSocket", "SingletonCookie"];
+		for (const file of lockFiles) {
+			const filePath = join(dir, file);
+			if (existsSync(filePath)) {
+				rmSync(filePath, { force: true });
+			}
 		}
 	} catch {}
 }
@@ -120,9 +118,19 @@ function copyProfile(src, dest) {
 			process.exit(1);
 		}
 	} else {
-		// Use rsync for Unix (faster for subsequent runs)
+		// Use rsync for Unix (faster for subsequent runs with exclude patterns)
 		try {
-			execSync(`rsync -a --delete "${src}/" "${dest}/"`, { stdio: "pipe" });
+			const excludes = [
+				"--exclude=SingletonLock",
+				"--exclude=SingletonSocket",
+				"--exclude=SingletonCookie",
+				"--exclude=*/Sessions/*",
+				"--exclude=*/Current Session",
+				"--exclude=*/Current Tabs",
+				"--exclude=*/Last Session",
+				"--exclude=*/Last Tabs"
+			];
+			execSync(`rsync -a --delete ${excludes.join(" ")} "${src}/" "${dest}/"`, { stdio: "pipe" });
 		} catch {
 			// Fallback to cp if rsync not available
 			try {
@@ -134,6 +142,17 @@ function copyProfile(src, dest) {
 		}
 	}
 }
+
+// Check if Chrome is already running on :9222
+try {
+	const browser = await puppeteer.connect({
+		browserURL: "http://localhost:9222",
+		defaultViewport: null,
+	});
+	await browser.disconnect();
+	console.log("✓ Chrome already running on :9222");
+	process.exit(0);
+} catch {}
 
 const chromePath = findChrome();
 if (!chromePath) {
@@ -151,21 +170,20 @@ if (!chromePath) {
 	process.exit(1);
 }
 
-// Kill existing Chrome
-killChrome();
-
-// Wait a bit for processes to fully die
-await new Promise((r) => setTimeout(r, 1000));
-
 // Setup profile directory
 const cacheDir = getCacheDir();
 mkdirSync(cacheDir, { recursive: true });
 
+// Remove SingletonLock to allow new instance
+removeSingletonLocks(cacheDir);
+
 if (useProfile) {
 	const profilePath = getDefaultProfilePath();
 	if (profilePath && existsSync(profilePath)) {
-		console.log("Copying profile (this may take a moment)...");
+		console.log("Syncing profile...");
 		copyProfile(profilePath, cacheDir);
+		// Remove locks again after copying
+		removeSingletonLocks(cacheDir);
 	} else {
 		console.error("✗ Default Chrome profile not found at:", profilePath);
 		process.exit(1);
@@ -180,14 +198,18 @@ const chromeArgs = [
 	"--no-default-browser-check",
 ];
 
-// Windows needs shell: true for proper detaching
-const spawnOptions = os === "win32"
-	? { detached: true, stdio: "ignore", shell: true }
-	: { detached: true, stdio: "ignore" };
+if (os === "win32") {
+	// Windows: Use 'start' command to properly detach Chrome
+	const escapedPath = `"${chromePath}"`;
+	const escapedArgs = chromeArgs.map(arg => `"${arg}"`).join(" ");
+	execSync(`start "" ${escapedPath} ${escapedArgs}`, { stdio: "ignore", windowsHide: true });
+} else {
+	// Unix: Standard detached spawn
+	const proc = spawn(chromePath, chromeArgs, { detached: true, stdio: "ignore" });
+	proc.unref();
+}
 
-spawn(chromePath, chromeArgs, spawnOptions).unref();
-
-// Wait for Chrome to be ready by attempting to connect
+// Wait for Chrome to be ready
 let connected = false;
 for (let i = 0; i < 30; i++) {
 	try {
